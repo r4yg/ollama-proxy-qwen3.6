@@ -1,0 +1,21 @@
+[Unit]
+Description=qwen-coder-proxy (Qwen3.6 XML -> OpenAI tool_calls bridge for Ollama)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# These three lines are substituted by install.sh:
+WorkingDirectory=__INSTALL_DIR__
+ExecStart=__INSTALL_DIR__/start_proxy.sh
+Environment="INSTALL_DIR=__INSTALL_DIR__"
+Environment="QWEN_PROXY_HOST=0.0.0.0"
+Environment="QWEN_PROXY_PORT=18000"
+Environment="QWEN_PROXY_UPSTREAM=http://127.0.0.1:11434"
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:__INSTALL_DIR__/proxy.log
+StandardError=append:__INSTALL_DIR__/proxy.log
+
+[Install]
+WantedBy=default.target

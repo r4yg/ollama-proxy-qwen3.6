@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.qwen-coder-proxy</string>
+
+    <!-- The install.sh substitutes __INSTALL_DIR__ with the actual path -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>__INSTALL_DIR__/start_proxy.sh</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>INSTALL_DIR</key>
+        <string>__INSTALL_DIR__</string>
+        <key>QWEN_PROXY_HOST</key>
+        <string>0.0.0.0</string>
+        <key>QWEN_PROXY_PORT</key>
+        <string>18000</string>
+        <key>QWEN_PROXY_UPSTREAM</key>
+        <string>http://127.0.0.1:11434</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__INSTALL_DIR__/proxy.log</string>
+    <key>StandardErrorPath</key>
+    <string>__INSTALL_DIR__/proxy.log</string>
+</dict>
+</plist>

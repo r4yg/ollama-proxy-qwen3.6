@@ -1,0 +1,87 @@
+FROM qwen3.6:35b-a3b
+
+PARAMETER num_ctx 60000
+PARAMETER stop <|im_start|>
+PARAMETER stop <|im_end|>
+PARAMETER temperature 0.3
+PARAMETER top_k 20
+PARAMETER top_p 0.9
+
+TEMPLATE """{{- if .Tools }}<|im_start|>system
+# Tools
+
+You have access to the following functions:
+
+<tools>
+{{- range .Tools }}
+{"type": "function", "function": {{ .Function }}}
+{{- end }}
+</tools>
+
+If you choose to call a function ONLY reply in the following format with NO suffix:
+
+<tool_call>
+<function=example_function_name>
+<parameter=example_parameter_1>
+value_1
+</parameter>
+<parameter=example_parameter_2>
+This is the value for the second parameter
+that can span
+multiple lines
+</parameter>
+</function>
+</tool_call>
+
+<IMPORTANT>
+Reminder:
+- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags
+- Required parameters MUST be specified
+- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after
+- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls
+- NEVER end a turn with empty content. Every turn must contain either substantive text or a complete tool call with all required parameters.
+- Do NOT produce filler turns like "Let me check..." or "Let me wait..." without an accompanying tool call. If you intend to check or wait, the same turn must include the actual tool call.
+- Do NOT start long-running foreground processes (dev servers, watchers, daemons) with the bash tool — they never terminate and the bash tool will time out after 60s. To verify a project: prefer `npm run build` / `npx vite build` (terminates cleanly). If you genuinely need a server up: background it with `(cmd > file.log 2>&1 &)` then verify with `curl` and `sleep`, and kill it explicitly afterwards.
+</IMPORTANT>
+{{- if .System }}
+
+{{ .System }}
+{{- end }}<|im_end|>
+{{ else if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}
+{{- range $i, $msg := .Messages }}
+{{- if eq $msg.Role "user" }}<|im_start|>user
+{{ $msg.Content }}<|im_end|>
+{{ else if eq $msg.Role "assistant" }}<|im_start|>assistant
+{{- if $msg.Content }}
+{{ $msg.Content }}
+{{- end }}
+{{- if $msg.ToolCalls }}
+{{- range $msg.ToolCalls }}
+
+<tool_call>
+<function={{ .Function.Name }}>
+{{- range $key, $value := .Function.Arguments }}
+<parameter={{ $key }}>
+{{- if eq (printf "%T" $value) "string" }}
+{{ $value }}
+{{- else }}
+{{ $value | json }}
+{{- end }}
+</parameter>
+{{- end }}
+</function>
+</tool_call>
+{{- end }}
+{{- end }}<|im_end|>
+{{ else if eq $msg.Role "tool" }}<|im_start|>user
+<tool_response>
+{{ $msg.Content }}
+</tool_response><|im_end|>
+{{ end }}
+{{- end }}<|im_start|>assistant
+<think>
+"""
+
+SYSTEM """You are a precise coding assistant with strong tool-use abilities, running inside an agentic coding harness."""
