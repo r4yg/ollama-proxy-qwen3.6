@@ -197,6 +197,13 @@ def _placeholder_for(name: str, existing_args: dict, prop_schema: dict) -> Any:
         return f"Run: {cmd}"
     if name == "description":
         return "(auto-filled by proxy: model omitted required description)"
+    # Special case: `priority` on todo-style items — opencode schemas commonly
+    # use enum ["low","medium","high"]; "medium" is the safest default.
+    if name == "priority":
+        enum = prop_schema.get("enum")
+        if enum:
+            return "medium" if "medium" in enum else enum[0]
+        return "medium"
     # enum default if present
     enum = prop_schema.get("enum")
     if enum:
@@ -216,10 +223,32 @@ def _placeholder_for(name: str, existing_args: dict, prop_schema: dict) -> Any:
     return ""
 
 
+def _fill_required_in_items(value: Any, item_schema: dict) -> int:
+    """If `value` is a list of objects and `item_schema` declares required
+    properties, inject placeholders for missing fields on each item.
+    Returns count of fields filled."""
+    if not isinstance(value, list) or not isinstance(item_schema, dict):
+        return 0
+    required = item_schema.get("required") or []
+    if not required:
+        return 0
+    properties = item_schema.get("properties") or {}
+    filled = 0
+    for elem in value:
+        if not isinstance(elem, dict):
+            continue
+        for r in required:
+            if r not in elem:
+                elem[r] = _placeholder_for(r, elem, properties.get(r) or {})
+                filled += 1
+    return filled
+
+
 def fill_missing_required_args(tool_calls: list[dict], tools: list[dict]) -> int:
     """For each tool call, ensure every required parameter from the tool's
-    schema is present in arguments. Inject placeholders for missing ones.
-    Returns count of fields filled."""
+    schema is present in arguments. Inject placeholders for missing ones,
+    INCLUDING required fields on items inside array-typed parameters
+    (e.g. todos[i].priority). Returns count of fields filled."""
     if not tools:
         return 0
     schema_by_name: dict[str, dict] = {}
@@ -243,11 +272,22 @@ def fill_missing_required_args(tool_calls: list[dict], tools: list[dict]) -> int
         except Exception:
             continue
         changed = False
+        # Top-level required fields
         for r in required:
             if r not in args:
                 args[r] = _placeholder_for(r, args, properties.get(r) or {})
                 changed = True
                 filled += 1
+        # Required fields on array items (e.g. todos[i].priority)
+        for prop_name, prop_schema in properties.items():
+            if not isinstance(prop_schema, dict):
+                continue
+            if prop_schema.get("type") != "array":
+                continue
+            n = _fill_required_in_items(args.get(prop_name), prop_schema.get("items") or {})
+            if n:
+                changed = True
+                filled += n
         if changed:
             fn["arguments"] = json.dumps(args, ensure_ascii=False)
     return filled
@@ -640,6 +680,32 @@ def _run_tests():
     assert_eq("todos is a list", isinstance(todos, list), True)
     assert_eq("two items", len(todos), 2)
     assert_eq("first item is dict", isinstance(todos[0], dict), True)
+
+    print("\nTest 6c: nested array items get missing required fields filled (todos[i].priority)")
+    calls_d = [{"function": {"name": "todowrite", "arguments": json.dumps({
+        "todos": [
+            {"content": "task 1", "status": "completed"},  # missing priority
+            {"content": "task 2", "status": "pending", "priority": "high"},
+        ]
+    })}}]
+    todo_full_tools = [{"type":"function","function":{"name":"todowrite","parameters":{
+        "type":"object",
+        "properties":{"todos":{"type":"array","items":{
+            "type":"object",
+            "properties":{
+                "content":{"type":"string"},
+                "status":{"type":"string"},
+                "priority":{"type":"string","enum":["low","medium","high"]},
+            },
+            "required":["content","status","priority"],
+        }}},
+        "required":["todos"],
+    }}}]
+    n = fill_missing_required_args(calls_d, todo_full_tools)
+    args_d = json.loads(calls_d[0]["function"]["arguments"])
+    assert_eq("filled count", n, 1)
+    assert_eq("priority filled on item 0", args_d["todos"][0].get("priority"), "medium")
+    assert_eq("item 1 unchanged", args_d["todos"][1].get("priority"), "high")
 
     print("\nTest 7: model-omits-description, proxy fills it from command")
     raw = ("<tool_call>\n<function=bash>\n<parameter=command>\nls /tmp\n</parameter>\n</function>\n</tool_call>")
