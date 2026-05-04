@@ -102,7 +102,16 @@ def _coerce_value(raw: str, prop_schema: dict | None = None) -> Any:
         try:
             return json.loads(s)
         except Exception:
-            return raw
+            pass
+        # Recovery: model sometimes emits comma-separated objects without the
+        # enclosing array brackets, e.g. `{"x":1},{"y":2}` instead of
+        # `[{"x":1},{"y":2}]`. If schema says array, try wrapping.
+        if schema_type == "array":
+            try:
+                return json.loads("[" + s + "]")
+            except Exception:
+                pass
+        return raw
 
     # No schema info: cautious heuristic. Only parse JSON if it looks unambiguously
     # like a structured value AND parses cleanly. NEVER parse for unknown schema —
@@ -616,6 +625,21 @@ def _run_tests():
     _, calls = extract_tool_calls(raw, tools=write_tools)
     args = json.loads(calls[0]["function"]["arguments"])
     assert_eq("content stays string", args["content"], '{"foo": "bar", "n": 5}')
+
+    print("\nTest 6b: array-typed param missing enclosing brackets is recovered")
+    raw = ('<tool_call>\n<function=todowrite>\n<parameter=todos>\n'
+           '{"content":"a","status":"done"},{"content":"b","status":"pending"}\n'
+           '</parameter>\n</function>\n</tool_call>')
+    todo_tools = [{"type":"function","function":{"name":"todowrite","parameters":{
+        "type":"object",
+        "properties":{"todos":{"type":"array","items":{"type":"object"}}},
+        "required":["todos"]}}}]
+    _, calls = extract_tool_calls(raw, tools=todo_tools)
+    args = json.loads(calls[0]["function"]["arguments"])
+    todos = args["todos"]
+    assert_eq("todos is a list", isinstance(todos, list), True)
+    assert_eq("two items", len(todos), 2)
+    assert_eq("first item is dict", isinstance(todos[0], dict), True)
 
     print("\nTest 7: model-omits-description, proxy fills it from command")
     raw = ("<tool_call>\n<function=bash>\n<parameter=command>\nls /tmp\n</parameter>\n</function>\n</tool_call>")
