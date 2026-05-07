@@ -300,6 +300,11 @@ def transform_response(body: dict, tools: list[dict] | None = None) -> dict:
       - Defensively fill missing required arguments
       - Split <think>...</think> reasoning into message.reasoning_content,
         leaving message.content with only the real reply text
+      - When finish_reason=length and the model never closed its <think>
+        block, treat ALL content as unclosed thinking (Qwen3.6's prompt
+        always pre-fills <think>\\n, so a cut-off response is by definition
+        truncated thinking). Without this, opencode renders the raw
+        thinking text as if it were the assistant's answer.
     """
     for choice in body.get("choices", []):
         msg = choice.get("message") or {}
@@ -319,12 +324,21 @@ def transform_response(body: dict, tools: list[dict] | None = None) -> dict:
                 if choice.get("finish_reason") in (None, "stop"):
                     choice["finish_reason"] = "tool_calls"
 
-        # Step 2: split thinking out of content
-        real_content, reasoning = split_thinking(content)
+        # Step 2: split thinking. Special case for truncated-mid-thinking
+        # responses (finish_reason=length with no </think> closure).
+        finish_reason = choice.get("finish_reason")
+        if (finish_reason == "length"
+                and "</think>" not in content
+                and content
+                and not msg.get("tool_calls")):
+            # Entire content is truncated thinking — keep it as reasoning,
+            # leave content empty so the client doesn't render thoughts as chat.
+            real_content, reasoning = "", content.strip()
+        else:
+            real_content, reasoning = split_thinking(content)
+
         msg["content"] = real_content if real_content else None
         if reasoning:
-            # OpenAI extension also used by DeepSeek; AI SDK openai-compatible
-            # routes this into a structured reasoning part for clients.
             msg["reasoning_content"] = reasoning
             msg["reasoning"] = reasoning
 
@@ -741,6 +755,24 @@ def _run_tests():
     assert "</think>" not in (msg.get("content") or ""), "content should not contain </think>"
     assert msg.get("reasoning_content") and "thoughts go here" in msg["reasoning_content"]
     print("  PASS </think> stripped, reasoning extracted")
+
+    print("\nTest 8b: finish_reason=length with unclosed <think> -> all to reasoning_content")
+    body = {
+        "id": "x", "model": "local-coder:35b-a3b",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "I will analyze this carefully step by step. First I need to understand the user's request",
+            },
+            "finish_reason": "length",
+        }],
+    }
+    out = transform_response(body)
+    msg = out["choices"][0]["message"]
+    assert_eq("content empty", msg.get("content"), None)
+    assert msg.get("reasoning_content") and "step by step" in msg["reasoning_content"]
+    print("  PASS truncated-mid-thinking moved entirely to reasoning_content")
 
     print("\nTest 9: split_thinking — Qwen3.6 prompt-prefixed think mode")
     real, reason = split_thinking("internal reasoning here\nstep 2\n</think>\n\nThe answer is 4.")
