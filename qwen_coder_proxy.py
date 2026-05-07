@@ -81,12 +81,35 @@ def _is_number(s: str) -> bool:
 
 def _coerce_value(raw: str, prop_schema: dict | None = None) -> Any:
     """Coerce a string parameter value based on the schema's declared type.
-    Falls back to a conservative heuristic if no schema is given."""
-    s = raw.strip()
-    schema_type = (prop_schema or {}).get("type")
+    Falls back to a conservative heuristic if no schema is given.
 
-    # Schema-driven branch — STRING always stays a string (critical: file content
-    # for Write/Edit must not be JSON-parsed even if it looks like JSON).
+    Schema robustness:
+      - Accepts compound types like `["array", "null"]` (picks first non-null).
+      - Treats schemas with `items` key as arrays even if `type` is missing.
+      - Treats schemas with `properties` key as objects even if `type` is missing.
+      - When schema is unavailable, falls back to JSON parsing if the value
+        clearly looks like a JSON array or object (starts with [ or {).
+    """
+    s = raw.strip()
+    schema = prop_schema or {}
+    schema_type = schema.get("type")
+
+    # Normalize compound types: ["array", "null"] -> "array"
+    if isinstance(schema_type, list):
+        non_null = [t for t in schema_type if t and t != "null"]
+        schema_type = non_null[0] if non_null else None
+
+    # If type wasn't explicit but the schema has `items`, treat as array.
+    # If it has `properties`, treat as object. (Both are common in
+    # underspecified schemas, e.g. ones generated from Effect Schema.)
+    if not schema_type:
+        if "items" in schema:
+            schema_type = "array"
+        elif "properties" in schema:
+            schema_type = "object"
+
+    # STRING always stays a string (file content for Write/Edit must not be
+    # JSON-parsed even if it looks like JSON).
     if schema_type == "string":
         return raw
     if schema_type in ("integer", "number"):
@@ -113,11 +136,17 @@ def _coerce_value(raw: str, prop_schema: dict | None = None) -> Any:
                 pass
         return raw
 
-    # No schema info: cautious heuristic. Only parse JSON if it looks unambiguously
-    # like a structured value AND parses cleanly. NEVER parse for unknown schema —
-    # treat as string by default to avoid breaking string-typed params.
+    # No usable schema info. If the value clearly looks like a JSON array or
+    # object AND parses cleanly, prefer the structured form. This catches the
+    # common case where the schema is partial or unrecognized but the value's
+    # shape is unambiguous.
     if not s:
         return ""
+    if s[0] in "[{":
+        try:
+            return json.loads(s)
+        except Exception:
+            pass
     return raw
 
 
@@ -753,6 +782,29 @@ def _run_tests():
     assert_eq("todos is a list", isinstance(todos, list), True)
     assert_eq("two items", len(todos), 2)
     assert_eq("first item is dict", isinstance(todos[0], dict), True)
+
+    print("\nTest 6e: schema robustness — array detected via items even without explicit type")
+    raw_w = ('<tool_call>\n<function=todowrite>\n<parameter=todos>\n'
+             '[{"content":"a","status":"done","priority":"high"}]\n'
+             '</parameter>\n</function>\n</tool_call>')
+    weird_tools = [{"type":"function","function":{"name":"todowrite","parameters":{
+        "type":"object",
+        "properties":{"todos":{"items":{"type":"object"}}},
+    }}}]
+    _, calls = extract_tool_calls(raw_w, tools=weird_tools)
+    args = json.loads(calls[0]["function"]["arguments"])
+    assert_eq("todos is a list", isinstance(args["todos"], list), True)
+    assert_eq("todos[0] is dict", isinstance(args["todos"][0], dict), True)
+
+    print("\nTest 6f: schema robustness — compound type ['array','null']")
+    weird_tools2 = [{"type":"function","function":{"name":"f","parameters":{
+        "type":"object",
+        "properties":{"items":{"type":["array","null"]}},
+    }}}]
+    raw_c = '<tool_call>\n<function=f>\n<parameter=items>\n[1,2,3]\n</parameter>\n</function>\n</tool_call>'
+    _, calls = extract_tool_calls(raw_c, tools=weird_tools2)
+    args = json.loads(calls[0]["function"]["arguments"])
+    assert_eq("compound type list parsed", args["items"], [1, 2, 3])
 
     print("\nTest 6c: nested array items get missing required fields filled (todos[i].priority)")
     calls_d = [{"function": {"name": "todowrite", "arguments": json.dumps({
