@@ -450,16 +450,53 @@ async def _stream_chat_completion(client_body: dict, headers: dict, tools: list[
                     made_progress = False
 
                     if in_thinking:
-                        idx = pending.find("</think>")
-                        if idx != -1:
-                            reasoning_text = pending[:idx]
+                        idx_think = pending.find("</think>")
+                        idx_tc    = pending.find("<tool_call>")
+
+                        # Tool call appears INSIDE thinking (before </think>).
+                        # Qwen3.6 sometimes emits <tool_call> before closing
+                        # </think>; we must extract it, otherwise the XML leaks
+                        # into reasoning_content and the client never sees a
+                        # structured tool_calls field.
+                        if idx_tc != -1 and (idx_think == -1 or idx_tc < idx_think):
+                            tc_end = pending.find("</tool_call>", idx_tc)
+                            if tc_end == -1:
+                                # Incomplete: emit any reasoning text before the
+                                # tool call, hold the partial tool call for next chunk.
+                                before = pending[:idx_tc]
+                                if before:
+                                    yield make_chunk({"reasoning_content": before,
+                                                      "reasoning": before})
+                                pending = pending[idx_tc:]
+                                break
+                            before = pending[:idx_tc]
+                            if before.strip():
+                                yield make_chunk({"reasoning_content": before,
+                                                  "reasoning": before})
+                            full_tc = pending[idx_tc: tc_end + len("</tool_call>")]
+                            _, calls = extract_tool_calls(full_tc, tools=tools)
+                            if calls:
+                                if tools:
+                                    fill_missing_required_args(calls, tools)
+                                for c in calls:
+                                    c["index"] = tool_count
+                                    tool_count += 1
+                                    yield make_chunk({"tool_calls": [c]})
+                            pending = pending[tc_end + len("</tool_call>"):]
+                            finish_reason = "tool_calls"
+                            made_progress = True
+                            continue
+
+                        if idx_think != -1:
+                            reasoning_text = pending[:idx_think]
                             if reasoning_text:
                                 yield make_chunk({"reasoning_content": reasoning_text,
                                                   "reasoning": reasoning_text})
-                            pending = pending[idx + len("</think>"):].lstrip("\n")
+                            pending = pending[idx_think + len("</think>"):].lstrip("\n")
                             in_thinking = False
                             made_progress = True
                             continue
+
                         keep = _safe_tail_keep(pending)
                         emit_reason = pending[:len(pending) - keep] if keep else pending
                         if emit_reason:
@@ -500,8 +537,30 @@ async def _stream_chat_completion(client_body: dict, headers: dict, tools: list[
 
             if pending:
                 if in_thinking:
-                    yield make_chunk({"reasoning_content": pending,
-                                      "reasoning": pending})
+                    # Look for a complete tool call inside leftover thinking.
+                    tool_match = _TOOL_CALL_RE.search(pending)
+                    if tool_match:
+                        before = pending[:tool_match.start()]
+                        if before.strip():
+                            yield make_chunk({"reasoning_content": before,
+                                              "reasoning": before})
+                        _, calls = extract_tool_calls(
+                            pending[tool_match.start():tool_match.end()], tools=tools)
+                        if calls:
+                            if tools:
+                                fill_missing_required_args(calls, tools)
+                            for c in calls:
+                                c["index"] = tool_count
+                                tool_count += 1
+                                yield make_chunk({"tool_calls": [c]})
+                            finish_reason = "tool_calls"
+                        leftover = pending[tool_match.end():]
+                        if leftover.strip():
+                            yield make_chunk({"reasoning_content": leftover,
+                                              "reasoning": leftover})
+                    else:
+                        yield make_chunk({"reasoning_content": pending,
+                                          "reasoning": pending})
                 else:
                     tool_match = _TOOL_CALL_RE.search(pending)
                     if tool_match:
